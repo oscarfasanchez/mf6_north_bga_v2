@@ -11,7 +11,8 @@ import geopandas as gpd
 # import gmshflow v0.1.0
 import gmshflow
 
-def create_voronoi_grid(wd_shp):
+def create_voronoi_grid(wd_shp, coarse_cs=200.0, medium_cs=30, fine_cs=5,
+                                    smooth_factor=1.1, plot=False):
     #load the shapefiles
 
     #load domain
@@ -37,11 +38,11 @@ def create_voronoi_grid(wd_shp):
     # Create the mesh
 
     # Define cell_size in each area
-    cs_dom = 200.0
-    cs_crk = 50.0
+    cs_dom = coarse_cs
+    cs_crk = medium_cs
     cs_obs = 10.0
     cs_fault = 50
-    cs_gal = 3
+    cs_gal = fine_cs
 
     # Add cell size column
     crks['cs'] = cs_crk
@@ -50,8 +51,8 @@ def create_voronoi_grid(wd_shp):
     gal['cs'] = cs_gal
 
 
-    # set creek only if its less than 300 meters from gal
-    crks = crks.loc[crks.distance(gal.geometry[0]) < 300]
+    # set creek only if its less than 500 meters from gal
+    crks = crks.loc[crks.distance(gal.geometry[0]) < 500]
 
     # Initialize GmshModel and GmshMeshDomain
     gmsh_model = gmshflow.GmshModel("north_bga_gmsh")
@@ -88,10 +89,12 @@ def create_voronoi_grid(wd_shp):
     gdf_faults_coord = faults_handler.convert_to_points_for_size_fields()
     gdf_gal_coord = gal_handler.convert_to_points_for_size_fields()
 
-    df_coords = pd.concat([ obs_handler.gdf_coord])#gdf_crk_coord, gdf_faults_coord, gdf_gal_coord,
+    df_coords = pd.concat([
+        obs_handler.gdf_coord, gdf_faults_coord, gdf_crk_coord,
+        gdf_gal_coord])#obs_handler.gdf_coord ,gdf_crk_coord, gdf_faults_coord, gdf_gal_coord,
 
     # #create exponential fields
-    mesh_domain.create_exponential_field(df_coords, fac=1.1)
+    mesh_domain.create_exponential_field(df_coords, fac=smooth_factor)
 
     # # # Set exponential field as background mesh
     mesh_domain.set_field()
@@ -100,24 +103,25 @@ def create_voronoi_grid(wd_shp):
     # mesh_domain.set_mesh_size_from_geometries(use_boundaries=False, use_points=False)
 
     ind_s_dom = mesh_domain.create_domain_surface()
-    # Run GUI 
-    gmsh_model.run_gui()
+    
     # Generate mesh
     print('Generating the mesh...')
     gmsh_model.generate_mesh()
     print('Mesh ready')
 
-      # Run GUI 
-    gmsh_model.run_gui()
+    
+    if plot:
+        # Run GUI 
+        gmsh_model.run_gui()
 
-    #get some quality stats of the triangular mesh
-    df_quality = gmsh_model.get_triangular_quality()
-    print(df_quality.gamma.min(), df_quality.gamma.mean())
-    df_quality.hist(column='gamma', bins=50)
+        #get some quality stats of the triangular mesh
+        df_quality = gmsh_model.get_triangular_quality()
+        print('Min and mean gamma:',df_quality.gamma.min(), df_quality.gamma.mean())
+        df_quality.hist(column='gamma', bins=50)
 
     # Export to Voronoi
     shp_mesh_name = "gdf_voro_bga"
-    gmsh_model.export_to_voronoi(wd_shp, "gdf_voro_bga", [ind_s_dom])
+    mesh_domain.export_to_voronoi(wd_shp, "gdf_voro_bga", [ind_s_dom])
 
 
     # Generate mesh
@@ -128,7 +132,8 @@ def create_voronoi_grid(wd_shp):
     #convert shapefile to cvfd to be imported in modflow6
     print('Converting shapefile to cvfd...')
     verts, iverts = flopy.utils.cvfdutil.shapefile_to_cvfd(
-                    os.path.join(wd_shp, f'{shp_mesh_name}.shp'), verbose=True, duplicate_decimals=3, skip_hanging_node_check=True)
+                    os.path.join(wd_shp, f'{shp_mesh_name}.shp'), verbose=True,
+                    duplicate_decimals=3, skip_hanging_node_check=True)
     gridprops = flopy.utils.cvfdutil.get_disv_gridprops(verts, iverts, xcyc=None)
 
     vertices = gridprops["vertices"]
@@ -144,13 +149,33 @@ def create_voronoi_grid(wd_shp):
         nlay=nlay,
         ncpl=ncpl,
     )
+    if plot:
+        modelgrid.plot()
 
     return modelgrid
 
+def define_temporal_discretization(totsim_days=365):
+    # time in seconds
+
+    nsper = totsim_days  # number of stress periods
+    perlen = 86400.0  # 1 day in seconds
+    nstp = 1  # number of time steps per period 
+    tsmult = 1.0  # time step multiplier
+
+    time_disc = [(perlen, nstp, tsmult) for _ in range(nsper-1)]#[perlen, nstp, tsmult]
+    time_disc.insert(0,(1,1,1.0))#inserting the steady stress period at the beginning of list
+    tdis= flopy.mf6.ModflowTdis(sim, pname="tdis",
+                              time_units="SECONDS", 
+                              nper=nsper, perioddata=time_disc)
+    period_ats =[(i, 86400, 1.0e-5, 86400, 2.0, 5.0) for i in range(1, nsper)]
+    ats = flopy.mf6.ModflowUtlats(tdis, maxats=len(period_ats), perioddata= period_ats, pname="ats"   )
+
+    return tdis, ats
+
 
 def define_vertical_discretizations(wd_raster):
-    pass   
-    
+    pass
+
     
 
 def create_mf6_model(ws):
@@ -161,8 +186,13 @@ def create_mf6_model(ws):
     wd_shp = os.path.join('..', '01_GIS',  'shp') 
     wd_raster = os.path.join('..', '01_GIS',  'raster')
     # Define the spatial discretization
-    modelgrid = create_voronoi_grid(wd_shp)
-    define_vertical_discretizations(wd_raster)
+    #define the cell sizes inside the voronoi function
+    modelgrid = create_voronoi_grid(wd_shp, coarse_cs=200.0, medium_cs=100.0, fine_cs=50.0,
+                                    smooth_factor=1.1, plot=False)
+
+    tdis, ats = define_temporal_discretization()
+    
+    define_vertical_discretizations()
     #define the temporal discretization
 
     #define the initial conditions
