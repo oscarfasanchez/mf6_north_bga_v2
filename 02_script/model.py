@@ -12,7 +12,8 @@ import geopandas as gpd
 import gmshflow
 
 def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=30, fine_cs=5,
-                                    smooth_factor=1.1, nlay=1, plot=False):
+                                    smooth_factor=1.1, bottom_model_offset=5,
+                                      geol_layer_division=[2, 2, 2, 2, 1], plot=False):
     gwf = sim.get_model()
     #load the shapefiles
 
@@ -139,6 +140,7 @@ def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=
 
 
     ncpl = gridprops["ncpl"]
+    nlay = sum(geol_layer_division)  # Number of layers based on geol_layer_division
     idomain = np.ones((nlay, ncpl), dtype=int)
     
     modelgrid = flopy.discretization.vertexgrid.VertexGrid(
@@ -154,7 +156,7 @@ def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=
     idomain = np.ones((nlay, ncpl), dtype=int)
 
     raster_names = ["R_Topo_resamp.tif",'R_Qd.tif', 'R_Qbg.tif', "R_Qbo2.tif", "R_Qbo1.tif"]
-    raster_data = []
+    raster_data = {}
     # Load the raster data for topography and other properties
     for raster_name in raster_names:
         raster_path = os.path.join(wd_raster, raster_name)
@@ -162,20 +164,45 @@ def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=
             raise FileNotFoundError(f"Raster file {raster_path} does not exist.")
         # Load the raster data
         raster = flopy.utils.Raster.load(raster_path)
-        raster_data.append(
-            raster.resample_to_grid(modelgrid, method='nearest', band=raster.bands[0])
-        )
-        # You can process the raster data as needed here
-        # For example, you might want to extract elevation or hydraulic conductivity values
+        raster_data[raster_name] = raster.resample_to_grid(modelgrid, method='nearest', band=raster.bands[0])
+    
+    assert geol_layer_division== [2, 2, 2, 2, 1], "geol_layer_division must be [2, 2, 2, 2, 1] or the code should be modified to handle different divisions"
+    # Qd
+    botm_ly1 = raster_data['R_Qd.tif'] + (raster_data["R_Topo_resamp.tif"] - raster_data['R_Qd.tif'])*(1 / geol_layer_division[0])
+    botm_ly2 = raster_data['R_Qd.tif'] 
+    
+    #Qbg
+    botm_ly3 = raster_data['R_Qbg.tif'] + (raster_data["R_Qd.tif"] - raster_data['R_Qbg.tif'])*(1 / geol_layer_division[1])
+    botm_ly4 = raster_data['R_Qbg.tif']
 
+    #Qbo2
+    botm_ly5 = raster_data['R_Qbo2.tif'] + (raster_data["R_Qbg.tif"] - raster_data['R_Qbo2.tif'])*(1 / geol_layer_division[2])
+    botm_ly6 = raster_data['R_Qbo2.tif']
+
+    #Qbo1
+    botm_ly7 = raster_data['R_Qbo1.tif'] + (raster_data["R_Qbo2.tif"] - raster_data['R_Qbo1.tif'])*(1 / geol_layer_division[3])
+    botm_ly8 = raster_data['R_Qbo1.tif'] 
+
+    # Bottom layer -Rock
+    min_value = np.minimum.reduce([botm_ly1, botm_ly2, botm_ly3, botm_ly4, botm_ly5, botm_ly6, botm_ly7, botm_ly8]).min()
+    botm_ly9 = np.ones(ncpl) * (min_value - bottom_model_offset)  # Adjusting the bottom
+
+    print(f"Bottom model elevation: {botm_ly9}")
+
+    
+
+    #create the botm array based on the geol_layer_division
+    botm = np.array([
+        botm_ly1, botm_ly2, botm_ly3, botm_ly4, botm_ly5, botm_ly6, botm_ly7, botm_ly8, botm_ly9    
+    ])
 
 
     disv = flopy.mf6.ModflowGwfdisv(
         gwf,
         nlay=nlay,
         **gridprops, # Unpack grid properties
-        top=raster_data[0],  # Top elevation of the model
-        botm=np.array(raster_data[0:]),  # Bottom elevation for each layer
+        top=raster_data["R_Topo_resamp.tif"],  # Top elevation of the model
+        botm=botm,  # Bottom elevation for each layer
         idomain=idomain,  # Domain indicator array
     )
     if plot:
@@ -238,7 +265,8 @@ def create_mf6_model(ws):
     # Define the spatial discretization
     #define the cell sizes inside the voronoi function
     disv = create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=30, fine_cs=5,
-                                    smooth_factor=1.1, nlay=5, plot=False)
+                                    smooth_factor=1.1, bottom_model_offset=50,
+                                      geol_layer_division=[2, 2, 2, 2, 1], plot=False)
 
 
     #define the temporal discretization
