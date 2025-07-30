@@ -11,8 +11,9 @@ import geopandas as gpd
 # import gmshflow v0.1.0
 import gmshflow
 
-def create_voronoi_grid(wd_shp, coarse_cs=200.0, medium_cs=30, fine_cs=5,
-                                    smooth_factor=1.1, plot=False):
+def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=30, fine_cs=5,
+                                    smooth_factor=1.1, nlay=1, plot=False):
+    gwf = sim.get_model()
     #load the shapefiles
 
     #load domain
@@ -136,25 +137,53 @@ def create_voronoi_grid(wd_shp, coarse_cs=200.0, medium_cs=30, fine_cs=5,
                     duplicate_decimals=3, skip_hanging_node_check=True)
     gridprops = flopy.utils.cvfdutil.get_disv_gridprops(verts, iverts, xcyc=None)
 
-    vertices = gridprops["vertices"]
-    cell2d = gridprops["cell2d"]
-    nlay = 1
+
     ncpl = gridprops["ncpl"]
     idomain = np.ones((nlay, ncpl), dtype=int)
-
-    modelgrid = flopy.discretization.VertexGrid(
-        vertices=vertices,
-        cell2d=cell2d,
+    
+    modelgrid = flopy.discretization.vertexgrid.VertexGrid(
+        vertices=gridprops["vertices"],
+        cell2d=gridprops["cell2d"],
         idomain=idomain,
         nlay=nlay,
-        ncpl=ncpl,
+        ncpl=ncpl,)
+
+    #now lets define the layers and Idomain
+    # Create a simple idomain array with all cells active
+    # This can be modified later to include inactive cells if needed
+    idomain = np.ones((nlay, ncpl), dtype=int)
+
+    raster_names = ["R_Topo_resamp.tif",'R_Qd.tif', 'R_Qbg.tif', "R_Qbo2.tif", "R_Qbo1.tif"]
+    raster_data = []
+    # Load the raster data for topography and other properties
+    for raster_name in raster_names:
+        raster_path = os.path.join(wd_raster, raster_name)
+        if not os.path.exists(raster_path):
+            raise FileNotFoundError(f"Raster file {raster_path} does not exist.")
+        # Load the raster data
+        raster = flopy.utils.Raster.load(raster_path)
+        raster_data.append(
+            raster.resample_to_grid(modelgrid, method='nearest', band=raster.bands[0])
+        )
+        # You can process the raster data as needed here
+        # For example, you might want to extract elevation or hydraulic conductivity values
+
+
+
+    disv = flopy.mf6.ModflowGwfdisv(
+        gwf,
+        nlay=nlay,
+        **gridprops, # Unpack grid properties
+        top=raster_data[0],  # Top elevation of the model
+        botm=np.array(raster_data[0:]),  # Bottom elevation for each layer
+        idomain=idomain,  # Domain indicator array
     )
     if plot:
-        modelgrid.plot()
+        disv.plot()
 
-    return modelgrid
+    return disv
 
-def define_temporal_discretization(totsim_days=365):
+def define_temporal_discretization(sim, totsim_days=365):
     # time in seconds
 
     nsper = totsim_days  # number of stress periods
@@ -173,26 +202,45 @@ def define_temporal_discretization(totsim_days=365):
     return tdis, ats
 
 
-def define_vertical_discretizations(wd_raster):
-    pass
 
-    
+
+def define_solver(sim):   
+    ims = flopy.mf6.ModflowIms(sim, pname="ims",
+                                          complexity= "MODERATE",print_option="SUMMARY",
+                                          outer_maximum=350, outer_dvclose=0.1,
+                                          under_relaxation="DBD", under_relaxation_gamma=0.1,
+                                          under_relaxation_theta=0.7, under_relaxation_kappa=0.1,
+                                          backtracking_number=20, backtracking_tolerance=20,
+                                          backtracking_reduction_factor=0.1, backtracking_residual_limit=0.002, 
+                                          inner_maximum=500, inner_dvclose=0.01,
+                                          linear_acceleration="bicgstab", preconditioner_levels=20,
+                                          preconditioner_drop_tolerance=0.0001,ats_outer_maximum_fraction=0.05,
+                                          scaling_method="DIAGONAL", reordering_method="MD",
+                                          number_orthogonalizations=2)
+    return ims
+
+
 
 def create_mf6_model(ws):
     # Create the Flopy simulation object
-    sim = flopy.mf6.MFSimulation(sim_name='north_bga_sim', sim_ws=ws, exe_name='mf6', version='mf6')
-    gwf = flopy.mf6.ModflowGwf(sim, modelname='north_bga_model', save_flows=True)
+    sim = flopy.mf6.MFSimulation(sim_name='north_bga_sim', sim_ws=ws,
+                                  exe_name='mf6', version='mf6')
+    gwf = flopy.mf6.ModflowGwf(sim, modelname='north_bga_model',
+                            newtonoptions="UNDER_RELAXATION",
+                              save_flows=True)
 
     wd_shp = os.path.join('..', '01_GIS',  'shp') 
     wd_raster = os.path.join('..', '01_GIS',  'raster')
+
+    ims = define_solver(sim)
+
+    tdis, ats = define_temporal_discretization(sim)
     # Define the spatial discretization
     #define the cell sizes inside the voronoi function
-    modelgrid = create_voronoi_grid(wd_shp, coarse_cs=200.0, medium_cs=100.0, fine_cs=50.0,
-                                    smooth_factor=1.1, plot=False)
+    disv = create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=30, fine_cs=5,
+                                    smooth_factor=1.1, nlay=5, plot=False)
 
-    tdis, ats = define_temporal_discretization()
-    
-    define_vertical_discretizations()
+
     #define the temporal discretization
 
     #define the initial conditions
@@ -217,4 +265,4 @@ def create_mf6_model(ws):
 
 if __name__ == '__main__':
     ws = os.path.join('..','03_models', 'base')
-    create_mf6_model(ws)
+    sim = create_mf6_model(ws)
