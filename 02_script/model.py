@@ -140,7 +140,9 @@ def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=
 
 
     ncpl = gridprops["ncpl"]
-    nlay = sum(geol_layer_division)  # Number of layers based on geol_layer_division
+    nlay = len(geol_layer_division)#sum(geol_layer_division)  # Number of layers based on geol_layer_division
+    # Create a simple idomain array with all cells active
+    # This can be modified later to include inactive cells if needed
     idomain = np.ones((nlay, ncpl), dtype=int)
     
     modelgrid = flopy.discretization.vertexgrid.VertexGrid(
@@ -150,10 +152,7 @@ def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=
         nlay=nlay,
         ncpl=ncpl,)
 
-    #now lets define the layers and Idomain
-    # Create a simple idomain array with all cells active
-    # This can be modified later to include inactive cells if needed
-    idomain = np.ones((nlay, ncpl), dtype=int)
+    #now lets define the layers
 
     raster_names = ["R_Topo_resamp.tif",'R_Qd.tif', 'R_Qbg.tif', "R_Qbo2.tif", "R_Qbo1.tif"]
     raster_data = {}
@@ -164,27 +163,27 @@ def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=
             raise FileNotFoundError(f"Raster file {raster_path} does not exist.")
         # Load the raster data
         raster = flopy.utils.Raster.load(raster_path)
-        raster_data[raster_name] = raster.resample_to_grid(modelgrid, method='nearest', band=raster.bands[0])
+        raster_data[raster_name] = raster.resample_to_grid(modelgrid, method='linear', band=raster.bands[0])
     
     assert geol_layer_division== [2, 2, 2, 2, 1], "geol_layer_division must be [2, 2, 2, 2, 1] or the code should be modified to handle different divisions"
     # Qd
-    botm_ly1 = raster_data['R_Qd.tif'] + (raster_data["R_Topo_resamp.tif"] - raster_data['R_Qd.tif'])*(1 / geol_layer_division[0])
+    # botm_ly1 = raster_data['R_Qd.tif'] + (raster_data["R_Topo_resamp.tif"] - raster_data['R_Qd.tif'])*(1 / geol_layer_division[0])
     botm_ly2 = raster_data['R_Qd.tif'] 
     
     #Qbg
-    botm_ly3 = raster_data['R_Qbg.tif'] + (raster_data["R_Qd.tif"] - raster_data['R_Qbg.tif'])*(1 / geol_layer_division[1])
+    # botm_ly3 = raster_data['R_Qbg.tif'] + (raster_data["R_Qd.tif"] - raster_data['R_Qbg.tif'])*(1 / geol_layer_division[1])
     botm_ly4 = raster_data['R_Qbg.tif']
 
     #Qbo2
-    botm_ly5 = raster_data['R_Qbo2.tif'] + (raster_data["R_Qbg.tif"] - raster_data['R_Qbo2.tif'])*(1 / geol_layer_division[2])
+    # botm_ly5 = raster_data['R_Qbo2.tif'] + (raster_data["R_Qbg.tif"] - raster_data['R_Qbo2.tif'])*(1 / geol_layer_division[2])
     botm_ly6 = raster_data['R_Qbo2.tif']
 
     #Qbo1
-    botm_ly7 = raster_data['R_Qbo1.tif'] + (raster_data["R_Qbo2.tif"] - raster_data['R_Qbo1.tif'])*(1 / geol_layer_division[3])
+    # botm_ly7 = raster_data['R_Qbo1.tif'] + (raster_data["R_Qbo2.tif"] - raster_data['R_Qbo1.tif'])*(1 / geol_layer_division[3])
     botm_ly8 = raster_data['R_Qbo1.tif'] 
 
     # Bottom layer -Rock
-    min_value = np.minimum.reduce([botm_ly1, botm_ly2, botm_ly3, botm_ly4, botm_ly5, botm_ly6, botm_ly7, botm_ly8]).min()
+    min_value = np.minimum.reduce([botm_ly2, botm_ly4, botm_ly6, botm_ly8]).min()
     botm_ly9 = np.ones(ncpl) * (min_value - bottom_model_offset)  # Adjusting the bottom
 
     print(f"Bottom model elevation: {botm_ly9}")
@@ -193,19 +192,88 @@ def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=
 
     #create the botm array based on the geol_layer_division
     botm = np.array([
-        botm_ly1, botm_ly2, botm_ly3, botm_ly4, botm_ly5, botm_ly6, botm_ly7, botm_ly8, botm_ly9    
+         botm_ly2, botm_ly4, botm_ly6, botm_ly8, botm_ly9    #botm_ly1, , botm_ly3, botm_ly5 , botm_ly7
     ])
 
+    top=raster_data["R_Topo_resamp.tif"]
+    
+    # get the area of each raster where its not equal to raster.nodatavals
+    active = np.where(botm < 1e30, 1, -1)#raster.nodatavals[0] there are two???
+
+    #IDOMAIN required to handle negative thickness,raster holes and inactive cells, also where the raster is not defined
+    # calculate the thickness array
+    thickness = np.zeros((nlay, ncpl), dtype=float)
+
+    botm[0, active[0] == -1] = top[active[0] == -1]  # Adjust bottom elevation for inactive cells 
+    thickness[0, :] = top[:] - botm[0, :]
+    idomain[0, thickness[0, :] <= 0] = -1  # Set pass through cells only in first layer
+    botm[0, thickness[0, :] <= 0] = top[thickness[0, :] <= 0]  # Adjust bottom elevation for pass through cells, that are
+    #recalculate thickness 
+    thickness[0, thickness[0, :] <= 0] = 0.0  # Set thickness to zero for pass through cells
+
+    for i in range(1, nlay):
+        botm[i, active[i] == -1] = botm[i - 1, active[i] == -1]  # Adjust bottom elevation for inactive cells
+        thickness[i, :] = botm[i - 1, :] - botm[i, :] 
+        # Set idomain based on active cells
+        idomain[i , thickness[i, :] <= 0] = -1  # Set pass through cells to inactive
+        # Set the last layer's thickness
+        botm[i, thickness[i, :] <= 0] = botm[i - 1, thickness[i, :] <= 0]  # Adjust bottom elevation for pass through cells
+        # Set the last layer's thickness to a minimum value
+        thickness[i, thickness[i, :] <= 0] = 0.0  # Set thickness to zero for pass through cells
+
+    # now lets set the missing layers by diving the original geological layers
+    #and duplicating the idomain
+    nlay = sum(geol_layer_division)  # Total number of layers after division
+    botm_div = np.zeros((nlay, ncpl), dtype=int)
+    idomain_div = np.zeros((nlay, ncpl), dtype=int)
+
+    botm_div[0, :] = botm[0, :]  + (top - botm[0, :]) * (1 / geol_layer_division[0])
+    idomain_div[0, :] = idomain[0, :]  
+
+    botm_div[1, :] = botm[0, :]
+    idomain_div[1, :] = idomain[0, :]
+
+    botm_div[2, :] = botm[1, :]  + (botm[0, :] - botm[1, :]) * (1 / geol_layer_division[1])
+    idomain_div[2, :] = idomain[1, :]
+
+    botm_div[3, :] = botm[1, :]
+    idomain_div[3, :] = idomain[1, :]
+
+    botm_div[4, :] = botm[2, :]  + (botm[1, :] - botm[2, :]) * (1 / geol_layer_division[2])
+    idomain_div[4, :] = idomain[2, :]
+
+    botm_div[5, :] = botm[2, :]
+    idomain_div[5, :] = idomain[2, :]
+
+    botm_div[6, :] = botm[3, :]  + (botm[2, :] - botm[3, :]) * (1 / geol_layer_division[3])
+    idomain_div[6, :] = idomain[3, :]
+
+    botm_div[7, :] = botm[3, :]
+    idomain_div[7, :] = idomain[3, :]
+
+    botm_div[8, :] = botm[4, :]
+    idomain_div[8, :] = idomain[4, :]
+
+
+
+
+
+
+    # # get the cells in the active domain, its not necessary when the cells has been excluded already from the model
+    # shp_dom = dom.geometry[0]
+    # ix = flopy.utils.GridIntersect(modelgrid, method='vertex')
+    # domain_cells = ix.intersect(shp_dom).cellids
+ 
 
     disv = flopy.mf6.ModflowGwfdisv(
         gwf,
         nlay=nlay,
         **gridprops, # Unpack grid properties
-        top=raster_data["R_Topo_resamp.tif"],  # Top elevation of the model
-        botm=botm,  # Bottom elevation for each layer
-        idomain=idomain,  # Domain indicator array
+        top=top,  # Top elevation of the model
+        botm=botm_div,  # Bottom elevation for each layer
+        idomain=idomain_div,  # Domain indicator array
     )
-    if plot:
+    if True:#plot:
         disv.plot()
 
     return disv
