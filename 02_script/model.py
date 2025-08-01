@@ -273,7 +273,7 @@ def create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=
         botm=botm_div,  # Bottom elevation for each layer
         idomain=idomain_div,  # Domain indicator array
     )
-    if True:#plot:
+    if plot:
         disv.plot()
 
     return disv
@@ -314,7 +314,25 @@ def define_solver(sim):
                                           number_orthogonalizations=2)
     return ims
 
+def create_npf_package(sim, kh, kv, geol_layer_division, plot=False):
+    gwf = sim.get_model()
+    # Define the conductivity for each layer
+    # Ensure that the length of kh and kv matches the number of layers
+    kh_div=[]
+    kv_div=[]
+    for glay in range(len(geol_layer_division)):
+        for div in range(geol_layer_division[glay]):
+            kh_div.append(kh[glay])
+            kv_div.append(kv[glay])
 
+    kh_div = np.array(kh_div)
+    kv_div = np.array(kv_div)
+    # Create the NPF package with specified parameters
+    npf = flopy.mf6.ModflowGwfnpf(gwf, icelltype=1, k=kh_div, k33overk=True, k33=kv_div,
+                                save_flows=True, save_specific_discharge=True)
+    if plot:
+        npf.plot()
+    return npf
 
 def create_mf6_model(ws):
     # Create the Flopy simulation object
@@ -327,17 +345,44 @@ def create_mf6_model(ws):
     wd_shp = os.path.join('..', '01_GIS',  'shp') 
     wd_raster = os.path.join('..', '01_GIS',  'raster')
 
-    ims = define_solver(sim)
 
+    ims = define_solver(sim)
+    
+    #define the temporal discretization
     tdis, ats = define_temporal_discretization(sim)
-    # Define the spatial discretization
+    # Define the spatial discretization1
     #define the cell sizes inside the voronoi function
+    geol_layer_division = [2, 2, 2, 2, 1]  # Geological layer division
     disv = create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=30, fine_cs=5,
                                     smooth_factor=1.1, bottom_model_offset=50,
-                                      geol_layer_division=[2, 2, 2, 2, 1], plot=False)
+                                      geol_layer_division=geol_layer_division, plot=False)
+
+    
+    
+    # define node property flow package
+    k_qd = 1e-7
+    k_qbg = 1e-5
+    k_qbo2 = 1e-7
+    k_qbo1 = 1e-8
+    k_rock = 1e-8
+
+    kv_qd = 0.1  # Example horizontal hydraulic conductivity for Qd
+    kv_qbg = 0.1  # Example vertical hydraulic conductivity for Qbg
+    kv_qbo2 = 0.1  # Example vertical hydraulic conductivity for Qbo2
+    kv_qbo1 = 0.1  # Example vertical hydraulic conductivity for Qbo
+    kv_rock = 0.1  # Example vertical hydraulic conductivity for rock
+
+    kh = np.array([
+        k_qd, k_qbg, k_qbo2, k_qbo1, k_rock
+    ])  # Horizontal hydraulic conductivity for each layer
+
+    kv = np.array([
+        kv_qd, kv_qbg, kv_qbo2, kv_qbo1, kv_rock
+    ])  # Vertical hydraulic conductivity for each layer
 
 
-    #define the temporal discretization
+    npf = create_npf_package(sim, kh=kh, kv=kv, geol_layer_division=geol_layer_division,
+                             plot=True)
 
     #define the initial conditions
 
