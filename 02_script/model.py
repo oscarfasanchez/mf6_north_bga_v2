@@ -334,6 +334,27 @@ def create_npf_package(sim, kh, kv, geol_layer_division, plot=False):
         npf.plot()
     return npf
 
+def create_river_chd_package(sim, wd_shp):
+    gwf = sim.get_model()
+    # Load the river shapefile
+    riv_shp = gpd.read_file(os.path.join(wd_shp, 'Rios.shp'))
+    ix = flopy.utils.GridIntersect(gwf.modelgrid, method='vertex')
+    # Intersect the river shapefile with the model grid
+    
+    for i, row in riv_shp.iterrows():
+        geom = row.geometry
+        stage = row['stage']
+        cond = row['cond']
+        # Find the grid cells that intersect with the river geometry
+        ix.intersect(geom)
+        # Create a new CHD package for the intersecting cells
+        chd = flopy.mf6.ModflowGwfchd(gwf, pname=f"chd_{i}", print_input=True, print_flows=True,
+                                      save_flows=True, mover=False)
+        # Add the river stage and conductance to the CHD package
+        chd.add_record((ix.cellid, stage, cond))
+
+    return chd
+
 def create_mf6_model(ws):
     # Create the Flopy simulation object
     sim = flopy.mf6.MFSimulation(sim_name='north_bga_sim', sim_ws=ws,
@@ -352,6 +373,7 @@ def create_mf6_model(ws):
     tdis, ats = define_temporal_discretization(sim)
     # Define the spatial discretization1
     #define the cell sizes inside the voronoi function
+    #TODO define minimum thickness for each layer
     geol_layer_division = [2, 2, 2, 2, 1]  # Geological layer division
     disv = create_disv_voronoi_grid(sim, wd_shp, wd_raster, coarse_cs=200.0, medium_cs=30, fine_cs=5,
                                     smooth_factor=1.1, bottom_model_offset=50,
@@ -380,15 +402,19 @@ def create_mf6_model(ws):
         kv_qd, kv_qbg, kv_qbo2, kv_qbo1, kv_rock
     ])  # Vertical hydraulic conductivity for each layer
 
-
+    
     npf = create_npf_package(sim, kh=kh, kv=kv, geol_layer_division=geol_layer_division,
-                             plot=True)
+                             plot=False)
 
     #define the initial conditions
+    start=np.empty((disv.nlay.array, disv.ncpl.array), dtype=float)
+    start [:] = gwf.dis.top.array
+    ic = flopy.mf6.ModflowGwfic(gwf, strt=start, pname="ic")
 
     #define the boundary conditions
 
     #define the RIVER package
+    riv = create_river_chd_package(sim, wd_shp)
 
     #define the ghb package
 
