@@ -336,24 +336,35 @@ def create_npf_package(sim, kh, kv, geol_layer_division, plot=False):
 
 def create_river_chd_package(sim, wd_shp):
     gwf = sim.get_model()
+    # lets get the model top elevation
+    top = gwf.dis.top.array
+    nlay = gwf.dis.nlay.array
+
     # Load the river shapefile
     riv_shp = gpd.read_file(os.path.join(wd_shp, 'Rios.shp'))
+    # lets merge all the element in the river shapefile into one geometry,
+    # because we dont have special data on it
     ix = flopy.utils.GridIntersect(gwf.modelgrid, method='vertex')
     # Intersect the river shapefile with the model grid
+    riv_geo = riv_shp.geometry.union_all()
+    riv_intersect = ix.intersect(riv_geo)
+    chd_spd = []
+    for i in range(riv_intersect.shape[0]):
+        # Get the cell ids and the top elevation for each intersected cell
+        cellid = riv_intersect["cellids"][i]
+        #let's check if the cellid is active if its -1 we apply to the cell below, or skip if inactive
+        # Look for the upper cell active
+        
+        for lay in range(nlay):
+            if gwf.dis.idomain.array[lay, cellid] == 1:
+                chd_spd.append([lay, *cellid, top[cellid] + 1])#add one meter of water to terrain
+                break
     
-    for i, row in riv_shp.iterrows():
-        geom = row.geometry
-        stage = row['stage']
-        cond = row['cond']
-        # Find the grid cells that intersect with the river geometry
-        ix.intersect(geom)
-        # Create a new CHD package for the intersecting cells
-        chd = flopy.mf6.ModflowGwfchd(gwf, pname=f"chd_{i}", print_input=True, print_flows=True,
-                                      save_flows=True, mover=False)
-        # Add the river stage and conductance to the CHD package
-        chd.add_record((ix.cellid, stage, cond))
+    chd_riv  = flopy.mf6.ModflowGwfchd(gwf, stress_period_data=chd_spd,
+                                       pname="chd", save_flows=True,
+                                       print_input=False, print_flows=True,)
 
-    return chd
+    return chd_riv
 
 def create_mf6_model(ws):
     # Create the Flopy simulation object
@@ -414,7 +425,7 @@ def create_mf6_model(ws):
     #define the boundary conditions
 
     #define the RIVER package
-    riv = create_river_chd_package(sim, wd_shp)
+    riv_chd = create_river_chd_package(sim, wd_shp)
 
     #define the ghb package
 
