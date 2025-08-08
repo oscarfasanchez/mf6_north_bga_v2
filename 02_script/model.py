@@ -365,6 +365,28 @@ def create_river_chd_package(sim, wd_shp):
                                        print_input=False, print_flows=True,)
 
     return chd_riv
+def create_ghb_package_lat_inflow(sim, wd_shp):
+    gwf = sim.get_model()
+    # Load the GHB shapefile
+    ghb_shp = gpd.read_file(os.path.join(wd_shp, 'Chd_In.shp'))
+    ghb_spd = []
+    ghb_geo = ghb_shp.geometry#there is only one geometry in the shapefile
+    ix = flopy.utils.GridIntersect(gwf.modelgrid, method='vertex')
+    # Get the cell ids and the elevation for each GHB
+    ghb_intersect = ix.intersect(ghb_geo)
+    for i in range(ghb_intersect.shape[0]):
+        # Get the cell ids and the top elevation for each intersected cell
+        cellid = ghb_intersect["cellids"][i]
+        #let's check if the cellid is active
+        for lay in range(gwf.dis.nlay.array):
+            if gwf.dis.idomain.array[lay, cellid] == 1:
+                ghb_spd.append([lay, *cellid, ghb_intersect["elev"][i]]) 
+
+
+    ghb = flopy.mf6.ModflowGwfghb(gwf, stress_period_data=ghb_spd,
+                                   pname="ghb", save_flows=True,
+                                   print_input=False, print_flows=True)
+    return ghb
 
 def create_mf6_model(ws):
     # Create the Flopy simulation object
@@ -428,6 +450,7 @@ def create_mf6_model(ws):
     riv_chd = create_river_chd_package(sim, wd_shp)
 
     #define the ghb package
+    ghb = create_ghb_package_lat_inflow(sim, wd_shp)
 
     #define the drain package for creeks
 
